@@ -1,0 +1,1 @@
+R1: simulation a weather station semsor which send data to a central API. snensor parameters and API IP address can be changed from a configuration file. 

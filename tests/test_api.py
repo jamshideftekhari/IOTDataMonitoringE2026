@@ -61,3 +61,45 @@ def test_unknown_metric_returns_422(client):
     client.put("/api/stations/ws-1", json=STATION)
     body = {"measured_at": now(), "readings": [{"metric": "uv_index", "value": 3}]}
     assert client.post("/api/stations/ws-1/measurements", json=body).status_code == 422
+
+
+def test_r2_city_state_and_wind_direction(client):
+    station = {**STATION, "city": "Copenhagen", "state": "Capital Region"}
+    assert client.put("/api/stations/ws-1", json=station).json()["city"] == "Copenhagen"
+    body = {
+        "measured_at": now(),
+        "readings": [{"metric": "temperature", "value": 10}],
+        "wind_direction": "NW",
+    }
+    assert client.post("/api/stations/ws-1/measurements", json=body).status_code == 201
+    latest = client.get("/api/stations/ws-1/measurements/latest").json()
+    assert latest["wind_direction"] == "NW"
+
+
+def test_invalid_wind_direction_returns_422(client):
+    client.put("/api/stations/ws-1", json=STATION)
+    body = {
+        "measured_at": now(),
+        "readings": [{"metric": "temperature", "value": 10}],
+        "wind_direction": "NNW-ish",
+    }
+    assert client.post("/api/stations/ws-1/measurements", json=body).status_code == 422
+
+
+def test_r1_sqlite_database_is_migrated(tmp_path):
+    """A database created before R2 (without the new columns) still works."""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """CREATE TABLE station (station_id TEXT PRIMARY KEY, name TEXT NOT NULL,
+               latitude REAL NOT NULL, longitude REAL NOT NULL, registered_at TEXT NOT NULL);
+           CREATE TABLE measurement (measurement_id TEXT PRIMARY KEY, station_id TEXT NOT NULL,
+               measured_at TEXT NOT NULL, received_at TEXT NOT NULL);
+           INSERT INTO station VALUES ('old', 'Old', 1, 2, '2026-01-01T00:00:00+00:00');"""
+    )
+    conn.commit()
+    conn.close()
+    client = TestClient(create_app(str(path)))
+    assert client.get("/api/stations/old").json()["city"] is None

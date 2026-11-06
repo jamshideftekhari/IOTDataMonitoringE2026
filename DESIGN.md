@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| Version | 1.0 (covers requirement **R1**) |
-| Date | 2026-11-05 |
+| Version | 2.0 (covers requirements **R1** and **R2**) |
+| Date | 2026-11-06 |
 | Approach | Domain-Driven Design (DDD) |
 
 > All diagrams are written in [Mermaid](https://mermaid.js.org/). They render directly on GitHub
@@ -15,6 +15,29 @@
 
 > **R1:** Simulate a weather station sensor that sends data to a central API.
 > Sensor parameters and the API IP address can be changed from a configuration file.
+
+> **R2:** Save measurements as time-series data in a MongoDB Atlas cluster (connection string in
+> `compass-connections.json`). A measurement document looks like:
+>
+> ```json
+> { "timestamp": ISODate("2025-08-19T12:00:00Z"),
+>   "metaField": { "sensorId": "A1234", "location": { "city": "New York", "state": "NY" } },
+>   "temperature": 25.4, "humidity": 48.2, "pressure": 1012.5,
+>   "windSpeed": 5.2, "windDirection": "NW" }
+> ```
+
+### 1.0 What R2 changed in the model
+
+| Change | Why | Type of change |
+|--------|-----|----------------|
+| New repositories `MongoStationRepository`, `MongoMeasurementRepository` | Store data in Atlas | **Infrastructure only** – domain and use cases unchanged |
+| `Location` got optional `city` and `state` | Needed for `metaField.location` | Domain (small, backward compatible) |
+| New value object `CompassDirection` (N, NE, … NW) and `Measurement.wind_direction` | Document has `windDirection: "NW"` (a text value, not a number) | Domain |
+| Sensor simulates a wind vane; config has `city`, `state`, `wind_direction` | Produce the new data | Sensor context |
+| `MONITORING_STORAGE=sqlite` or `mongodb` | Choose the storage without changing code | Configuration |
+
+The most important lesson of R2: **changing the database did not touch the domain layer or the
+application service**. Only a new adapter was added behind the existing repository interfaces.
 
 ### 1.1 Use cases derived from R1
 
@@ -39,7 +62,9 @@ The words below are used *the same way* in conversations, in the code and in the
 | **Reading** | One value for one metric, e.g. *temperature = 12.3 °C*. |
 | **Measurement** | All readings a station took at the same moment (`measured_at`). |
 | **Registration** | The act of a station making itself known to the central API. |
-| **Location** | Latitude / longitude of a station. |
+| **Location** | Latitude / longitude of a station, optionally with city and state (R2). |
+| **Wind direction** | Compass point the wind comes from: `N, NE, E, SE, S, SW, W, NW` (R2). |
+| **Time series** | (R2, storage term) Measurements ordered by time and grouped by sensor (`metaField`). |
 
 ---
 
@@ -61,8 +86,10 @@ flowchart LR
         SVC[MonitoringService]
         DOM[Domain model]
         DB[(SQLite)]
+        MDB[(MongoDB Atlas<br/>time series)]
         API --> SVC --> DOM
         SVC --> DB
+        SVC -. "R2: MONITORING_STORAGE=mongodb" .-> MDB
     end
     CLI -- "HTTP / JSON<br/>(published language)" --> API
 ```
@@ -99,6 +126,14 @@ classDiagram
         <<Value Object>>
         +latitude: float
         +longitude: float
+        +city: str?
+        +state: str?
+    }
+
+    class CompassDirection {
+        <<Value Object / Enumeration>>
+        N NE E SE S SW W NW
+        +from_degrees(deg)$
     }
 
     class Measurement {
@@ -108,6 +143,7 @@ classDiagram
         +measured_at: datetime
         +received_at: datetime
         +readings: tuple~Reading~
+        +wind_direction: CompassDirection?
         +create(...)$ Measurement
         +reading_for(metric) Reading
     }
@@ -153,6 +189,7 @@ classDiagram
     WeatherStation ..> Measurement : creates
     Measurement "*" --> "1" WeatherStation : station_id (reference by id)
     Measurement *-- "1..*" Reading
+    Measurement --> "0..1" CompassDirection
     Reading --> Metric
     MonitoringService --> StationRepository
     MonitoringService --> MeasurementRepository
@@ -177,6 +214,7 @@ aggregate would make it huge and slow to load. So `Measurement` is its own aggre
 | I5 | `measured_at` may not be in the future (60 s clock tolerance) | `Measurement.create` |
 | I6 | Only a **registered** station can submit measurements | `MonitoringService` + `WeatherStation.record_measurement` |
 | I7 | Station id and name may not be empty | `WeatherStation` |
+| I8 | Wind direction must be one of the 8 compass points (R2) | `CompassDirection` |
 
 ### 4.2 Sensor Simulation context (supporting)
 
@@ -213,6 +251,10 @@ classDiagram
         +metric
         +value
     }
+    class SimulatedWindVane {
+        <<Entity>>
+        +read() str
+    }
     class AppConfig {
         <<Value Object>>
         +api: ApiSettings
@@ -221,6 +263,7 @@ classDiagram
         +sensors
     }
     WeatherStationDevice *-- "1..*" SimulatedSensor
+    WeatherStationDevice *-- "0..1" SimulatedWindVane
     SimulatedSensor --> SensorSettings
     WeatherStationDevice ..> SensorSample : produces
     SensorSample *-- "1..*" SensorReading
@@ -229,6 +272,8 @@ classDiagram
 
 Each `SimulatedSensor` performs a **bounded random walk**: the next value is the previous value
 ± a random step (≤ `max_step`), clamped to `[min, max]`. This gives realistic, slowly-changing data.
+The `SimulatedWindVane` (R2) walks around the compass in degrees (wrapping at 360°) and reports the
+nearest of the 8 compass points.
 
 ### 4.3 Layered architecture (Monitoring context)
 
@@ -236,7 +281,7 @@ Each `SimulatedSensor` performs a **bounded random walk**: the next value is the
 flowchart TB
     A["API layer<br/>monitoring/api (FastAPI, DTOs)"] --> B["Application layer<br/>monitoring/application (use cases)"]
     B --> C["Domain layer<br/>monitoring/domain (entities, value objects, repository interfaces)"]
-    D["Infrastructure layer<br/>monitoring/infrastructure (SQLite repositories)"] -. implements .-> C
+    D["Infrastructure layer<br/>monitoring/infrastructure<br/>SQLite repositories / MongoDB repositories (R2)"] -. implements .-> C
     B --> D
 ```
 
@@ -296,6 +341,9 @@ sequenceDiagram
 
 ### 5.3 Internal sequence – how "submit measurement" flows through the layers
 
+With `MONITORING_STORAGE=mongodb` (R2) the repositories are the MongoDB ones. The SSDs above do not
+change at all – storage is invisible to the actor.
+
 ```mermaid
 sequenceDiagram
     participant R as API route
@@ -313,9 +361,28 @@ sequenceDiagram
     Svc-->>R: measurement
 ```
 
+### 5.4 Internal sequence – MongoDB repository (R2)
+
+```mermaid
+sequenceDiagram
+    participant Svc as MonitoringService
+    participant MR as MongoMeasurementRepository
+    participant SR as MongoStationRepository
+    participant Atlas as MongoDB Atlas
+    Svc->>MR: add(measurement)
+    MR->>SR: get(station_id)
+    SR->>Atlas: stations.find_one({_id})
+    Atlas-->>SR: station document
+    SR-->>MR: WeatherStation (city, state)
+    MR->>MR: measurement_to_document(measurement, location)
+    MR->>Atlas: measurements.insert_one(doc) (time-series collection)
+```
+
 ---
 
 ## 6. ER diagram (persistence)
+
+### 6.1 SQLite (R1, still the default)
 
 ```mermaid
 erDiagram
@@ -327,6 +394,8 @@ erDiagram
         TEXT name
         REAL latitude
         REAL longitude
+        TEXT city "R2, nullable"
+        TEXT state "R2, nullable"
         TEXT registered_at "ISO-8601 UTC"
     }
     MEASUREMENT {
@@ -334,6 +403,7 @@ erDiagram
         TEXT station_id FK
         TEXT measured_at "ISO-8601 UTC"
         TEXT received_at "ISO-8601 UTC"
+        TEXT wind_direction "R2, nullable"
     }
     READING {
         TEXT measurement_id PK, FK
@@ -352,6 +422,72 @@ Mapping from domain to tables:
 | `Reading` (value object) | `reading` | No own id; the composite key `(measurement_id, metric)` also enforces invariant I4. |
 
 Index: `measurement(station_id, measured_at DESC)` for fast "latest" queries.
+An R1 database is migrated automatically on start-up (the R2 columns are added).
+
+### 6.2 MongoDB Atlas (R2)
+
+Database `weather_monitoring` (change with `MONGODB_DATABASE`):
+
+```mermaid
+erDiagram
+    STATIONS ||--o{ MEASUREMENTS : "metaField.sensorId = _id"
+    STATIONS {
+        string _id PK "station_id"
+        string name
+        object location "latitude, longitude, city, state"
+        date registeredAt
+    }
+    MEASUREMENTS {
+        string _id PK "measurement_id (UUID)"
+        date timestamp "timeField"
+        object metaField "sensorId, location.city, location.state"
+        double temperature
+        double humidity
+        double pressure
+        double windSpeed
+        string windDirection "N..NW"
+        date receivedAt
+    }
+```
+
+`measurements` is a **time-series collection**:
+
+```js
+db.createCollection("measurements", {
+  timeseries: { timeField: "timestamp", metaField: "metaField", granularity: "seconds" }
+})
+db.measurements.createIndex({ "metaField.sensorId": 1, "timestamp": -1 })
+```
+
+Example document as stored by the API:
+
+```json
+{
+  "_id": "294a3f8b-4fe8-41e5-8289-a938b6f787e2",
+  "timestamp": { "$date": "2026-11-06T12:00:00Z" },
+  "metaField": { "sensorId": "ws-001", "location": { "city": "Copenhagen", "state": "Capital Region" } },
+  "temperature": 12.02,
+  "humidity": 69.45,
+  "pressure": 1012.63,
+  "windSpeed": 4.88,
+  "windDirection": "NW",
+  "receivedAt": { "$date": "2026-11-06T12:00:00.012Z" }
+}
+```
+
+Design notes:
+
+- The document follows the required R2 shape. Two fields are added: `_id` (the domain's
+  `measurement_id`) and `receivedAt` (a domain attribute), so that a measurement can be loaded
+  back without losing information.
+- **metaField** holds what identifies a series and rarely changes (sensor + location). MongoDB
+  groups documents with the same metaField into buckets, which makes storage and queries efficient.
+- `city`/`state` are copied (denormalised) into every measurement. That is normal for time series:
+  you can filter by city without a join, and the document records where the station was when it
+  measured.
+- Metrics that a station does not have are simply left out of the document.
+- Only `mongodb_repository.py` knows the document layout (mapping functions
+  `measurement_to_document` / `measurement_from_document`).
 
 ---
 
@@ -382,9 +518,13 @@ All bodies are JSON. Timestamps are ISO-8601; times without a timezone are treat
 {
   "name": "Roof station, building A",
   "latitude": 55.6761,
-  "longitude": 12.5683
+  "longitude": 12.5683,
+  "city": "Copenhagen",
+  "state": "Capital Region"
 }
 ```
+
+`city` and `state` (R2) are optional.
 
 Response `201 Created` (new) or `200 OK` (updated):
 
@@ -394,6 +534,8 @@ Response `201 Created` (new) or `200 OK` (updated):
   "name": "Roof station, building A",
   "latitude": 55.6761,
   "longitude": 12.5683,
+  "city": "Copenhagen",
+  "state": "Capital Region",
   "registered_at": "2026-11-05T13:47:12.940000Z"
 }
 ```
@@ -413,9 +555,12 @@ so the sensor can safely re-register every time it starts.
     { "metric": "humidity",    "value": 69.45 },
     { "metric": "pressure",    "value": 1012.63 },
     { "metric": "wind_speed",  "value": 4.88 }
-  ]
+  ],
+  "wind_direction": "NW"
 }
 ```
+
+`wind_direction` (R2) is optional; allowed values `N, NE, E, SE, S, SW, W, NW`.
 
 Response `201 Created`:
 
@@ -430,7 +575,8 @@ Response `201 Created`:
     { "metric": "pressure",    "value": 1012.63, "unit": "hPa" },
     { "metric": "temperature", "value": 12.02,   "unit": "°C" },
     { "metric": "wind_speed",  "value": 4.88,    "unit": "m/s" }
-  ]
+  ],
+  "wind_direction": "NW"
 }
 ```
 
@@ -443,7 +589,7 @@ The sensor sends no units – the **server owns the unit** for each metric (part
 | 404 | Station not registered | `{"detail": "station 'ws-999' is not registered"}` |
 | 404 | No measurements yet (`/latest`) | `{"detail": "no measurements yet"}` |
 | 422 | Domain rule broken (I1–I5, I7) | `{"detail": "humidity=150.0 is outside the valid range [0.0, 100.0]"}` |
-| 422 | Malformed JSON / unknown metric / missing field | FastAPI validation error list |
+| 422 | Malformed JSON / unknown metric / invalid wind direction / missing field | FastAPI validation error list |
 
 ---
 
@@ -456,9 +602,24 @@ The sensor sends no units – the **server owns the unit** for each metric (part
 | `api.host` | **IP address** (or host name) of the central API |
 | `api.port` | Port of the central API |
 | `api.timeout_seconds` | HTTP timeout |
-| `station.*` | Identity and location of the simulated station |
+| `station.*` | Identity and location of the simulated station (`city`, `state` added in R2) |
 | `interval_seconds` | Seconds between two measurements |
 | `sensors[]` | One entry per sensor: `metric`, `start`, `min`, `max`, `max_step` |
+| `wind_direction` | (R2, optional) `start_degrees`, `max_step_degrees` for the wind vane |
+
+### 8.1 Server configuration (environment variables)
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `MONITORING_STORAGE` | `sqlite` | `sqlite` or `mongodb` |
+| `MONITORING_DB` | `monitoring.db` | SQLite file |
+| `MONGODB_PASSWORD` | – | Password for the user in `compass-connections.json` (Compass does not export it) |
+| `MONGODB_URI` | – | Full connection string; overrides the Compass file |
+| `MONGODB_COMPASS_FILE` | `compass-connections.json` | Compass export to read the connection string from |
+| `MONGODB_CONNECTION` | first | Which connection in the file (name, id or host) |
+| `MONGODB_DATABASE` | `weather_monitoring` | Database name |
+
+Secrets are never written to files in the project.
 
 Remove an entry from `sensors` to simulate a station without that sensor. The simulator validates
 the file at start-up (e.g. `min ≤ start ≤ max`) and stops with a clear message if it is wrong.
@@ -477,4 +638,6 @@ The design is prepared for gradual extension:
 | Authentication of stations | API key per station stored on `WeatherStation`. |
 | Statistics (min/max/avg per day) | New query use case / read model. |
 | MQTT instead of HTTP | New adapter in the sensor context; the domain stays the same. |
+| Data retention in MongoDB | `expireAfterSeconds` on the time-series collection. |
+| Aggregated statistics from MongoDB | Aggregation pipeline (see `scripts/show_measurements.py --stats`) exposed as an API endpoint. |
 | Dashboard | Front-end that uses the GET endpoints. |

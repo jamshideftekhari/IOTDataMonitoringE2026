@@ -20,7 +20,13 @@ class MonitoringApiClient:
         self._request(
             "PUT",
             f"/api/stations/{station.station_id}",
-            {"name": station.name, "latitude": station.latitude, "longitude": station.longitude},
+            {
+                "name": station.name,
+                "latitude": station.latitude,
+                "longitude": station.longitude,
+                "city": station.city,
+                "state": station.state,
+            },
         )
 
     def send_sample(self, station_id: str, sample: SensorSample) -> dict:
@@ -30,6 +36,7 @@ class MonitoringApiClient:
             {
                 "measured_at": sample.measured_at.isoformat(),
                 "readings": [{"metric": r.metric, "value": r.value} for r in sample.readings],
+                "wind_direction": sample.wind_direction,
             },
         )
 

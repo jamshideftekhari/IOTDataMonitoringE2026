@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from monitoring.domain.model import (
+    CompassDirection,
     Location,
     Measurement,
     Metric,
@@ -37,10 +38,16 @@ class MonitoringService:
 
     # --- Use case: register (or update) a station --------------------------
     def register_station(
-        self, station_id: str, name: str, latitude: float, longitude: float
+        self,
+        station_id: str,
+        name: str,
+        latitude: float,
+        longitude: float,
+        city: str | None = None,
+        state: str | None = None,
     ) -> tuple[WeatherStation, bool]:
         """Idempotent registration. Returns (station, created)."""
-        location = Location(latitude, longitude)
+        location = Location(latitude, longitude, city, state)
         station = self._stations.get(station_id)
         if station is None:
             station = WeatherStation(station_id=station_id, name=name, location=location)
@@ -61,11 +68,16 @@ class MonitoringService:
 
     # --- Use case: receive a measurement from a sensor ---------------------
     def submit_measurement(
-        self, station_id: str, measured_at: datetime, readings: list[ReadingInput]
+        self,
+        station_id: str,
+        measured_at: datetime,
+        readings: list[ReadingInput],
+        wind_direction: str | None = None,
     ) -> Measurement:
         station = self.get_station(station_id)
         domain_readings = [Reading(Metric(r.metric), r.value) for r in readings]
-        measurement = station.record_measurement(measured_at, domain_readings)
+        direction = CompassDirection(wind_direction) if wind_direction else None
+        measurement = station.record_measurement(measured_at, domain_readings, direction)
         self._measurements.add(measurement)
         return measurement
 

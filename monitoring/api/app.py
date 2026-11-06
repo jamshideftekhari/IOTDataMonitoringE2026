@@ -3,6 +3,11 @@
 Run:
     uvicorn monitoring.api.app:create_app --factory --host 0.0.0.0 --port 8000
 
+Storage is chosen with the environment variable MONITORING_STORAGE:
+    sqlite   (default) - local file, path in MONITORING_DB
+    mongodb  (R2)      - MongoDB Atlas time-series collection,
+                         see monitoring/infrastructure/mongo_config.py
+
 Interactive docs: http://<host>:8000/docs
 """
 from __future__ import annotations
@@ -25,16 +30,44 @@ from monitoring.application.service import (
     StationNotFoundError,
 )
 from monitoring.domain.model import DomainError
-from monitoring.infrastructure.sqlite_repository import (
-    SqliteDatabase,
-    SqliteMeasurementRepository,
-    SqliteStationRepository,
-)
+from monitoring.domain.repository import MeasurementRepository, StationRepository
 
 
-def create_app(db_path: str | None = None) -> FastAPI:
-    db = SqliteDatabase(db_path or os.getenv("MONITORING_DB", "monitoring.db"))
-    service = MonitoringService(SqliteStationRepository(db), SqliteMeasurementRepository(db))
+def build_repositories(
+    storage: str, db_path: str | None = None
+) -> tuple[StationRepository, MeasurementRepository]:
+    """Choose the infrastructure. The rest of the application does not care which."""
+    if storage == "sqlite":
+        from monitoring.infrastructure.sqlite_repository import (
+            SqliteDatabase,
+            SqliteMeasurementRepository,
+            SqliteStationRepository,
+        )
+
+        db = SqliteDatabase(db_path or os.getenv("MONITORING_DB", "monitoring.db"))
+        return SqliteStationRepository(db), SqliteMeasurementRepository(db)
+
+    if storage == "mongodb":
+        from monitoring.infrastructure.mongo_config import load_mongo_settings
+        from monitoring.infrastructure.mongodb_repository import (
+            MongoMeasurementRepository,
+            MongoStationRepository,
+            connect,
+            ensure_collections,
+        )
+
+        settings = load_mongo_settings()
+        db = connect(settings)
+        ensure_collections(db, settings)
+        stations = MongoStationRepository(db, settings)
+        return stations, MongoMeasurementRepository(db, settings, stations)
+
+    raise ValueError(f"unknown MONITORING_STORAGE '{storage}' (use 'sqlite' or 'mongodb')")
+
+
+def create_app(db_path: str | None = None, storage: str | None = None) -> FastAPI:
+    storage = (storage or os.getenv("MONITORING_STORAGE", "sqlite")).lower()
+    service = MonitoringService(*build_repositories(storage, db_path))
 
     app = FastAPI(
         title="IoT Weather Monitoring API",
@@ -53,7 +86,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     @app.get("/health", tags=["system"])
     def health() -> dict[str, str]:
-        return {"status": "ok"}
+        return {"status": "ok", "storage": storage}
 
     # ---------------------------------------------------------------- stations
     @app.put(
@@ -65,7 +98,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
     )
     def register_station(station_id: str, body: StationIn, response: Response) -> StationOut:
         station, created = service.register_station(
-            station_id, body.name, body.latitude, body.longitude
+            station_id, body.name, body.latitude, body.longitude, body.city, body.state
         )
         response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return StationOut.from_domain(station)
@@ -97,6 +130,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
             station_id,
             body.measured_at,
             [ReadingInput(r.metric.value, r.value) for r in body.readings],
+            body.wind_direction.value if body.wind_direction else None,
         )
         return MeasurementOut.from_domain(measurement)
 

@@ -10,7 +10,7 @@ import threading
 from datetime import datetime
 from uuid import UUID
 
-from monitoring.domain.model import Location, Measurement, Metric, Reading, WeatherStation
+from monitoring.domain.model import CompassDirection, Location, Measurement, Metric, Reading, WeatherStation
 from monitoring.domain.repository import MeasurementRepository, StationRepository
 
 SCHEMA = """
@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS station (
     name           TEXT NOT NULL,
     latitude       REAL NOT NULL,
     longitude      REAL NOT NULL,
+    city           TEXT,
+    state          TEXT,
     registered_at  TEXT NOT NULL
 );
 
@@ -26,7 +28,8 @@ CREATE TABLE IF NOT EXISTS measurement (
     measurement_id TEXT PRIMARY KEY,
     station_id     TEXT NOT NULL REFERENCES station(station_id),
     measured_at    TEXT NOT NULL,
-    received_at    TEXT NOT NULL
+    received_at    TEXT NOT NULL,
+    wind_direction TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_measurement_station_time
     ON measurement (station_id, measured_at DESC);
@@ -49,7 +52,21 @@ class SqliteDatabase:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.lock = threading.Lock()
+
+    def _migrate(self) -> None:
+        """Add columns introduced in R2 to a database created with R1."""
+        new_columns = {
+            "station": {"city": "TEXT", "state": "TEXT"},
+            "measurement": {"wind_direction": "TEXT"},
+        }
+        for table, columns in new_columns.items():
+            existing = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+            for column, sql_type in columns.items():
+                if column not in existing:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+        self.conn.commit()
 
 
 class SqliteStationRepository(StationRepository):
@@ -71,17 +88,22 @@ class SqliteStationRepository(StationRepository):
     def save(self, station: WeatherStation) -> None:
         with self._db.lock, self._db.conn:
             self._db.conn.execute(
-                """INSERT INTO station (station_id, name, latitude, longitude, registered_at)
-                   VALUES (?, ?, ?, ?, ?)
+                """INSERT INTO station
+                       (station_id, name, latitude, longitude, city, state, registered_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(station_id) DO UPDATE SET
                        name = excluded.name,
                        latitude = excluded.latitude,
-                       longitude = excluded.longitude""",
+                       longitude = excluded.longitude,
+                       city = excluded.city,
+                       state = excluded.state""",
                 (
                     station.station_id,
                     station.name,
                     station.location.latitude,
                     station.location.longitude,
+                    station.location.city,
+                    station.location.state,
                     station.registered_at.isoformat(),
                 ),
             )
@@ -94,16 +116,19 @@ class SqliteMeasurementRepository(MeasurementRepository):
     def add(self, measurement: Measurement) -> None:
         with self._db.lock, self._db.conn:
             self._db.conn.execute(
-                "INSERT INTO measurement VALUES (?, ?, ?, ?)",
+                """INSERT INTO measurement
+                       (measurement_id, station_id, measured_at, received_at, wind_direction)
+                   VALUES (?, ?, ?, ?, ?)""",
                 (
                     str(measurement.measurement_id),
                     measurement.station_id,
                     measurement.measured_at.isoformat(),
                     measurement.received_at.isoformat(),
+                    measurement.wind_direction.value if measurement.wind_direction else None,
                 ),
             )
             self._db.conn.executemany(
-                "INSERT INTO reading VALUES (?, ?, ?, ?)",
+                "INSERT INTO reading (measurement_id, metric, value, unit) VALUES (?, ?, ?, ?)",
                 [
                     (str(measurement.measurement_id), r.metric.value, r.value, r.unit)
                     for r in measurement.readings
@@ -134,6 +159,9 @@ class SqliteMeasurementRepository(MeasurementRepository):
             measured_at=datetime.fromisoformat(row["measured_at"]),
             received_at=datetime.fromisoformat(row["received_at"]),
             readings=tuple(Reading(Metric(r["metric"]), r["value"]) for r in readings),
+            wind_direction=(
+                CompassDirection(row["wind_direction"]) if row["wind_direction"] else None
+            ),
         )
 
 
@@ -141,6 +169,6 @@ def _row_to_station(row: sqlite3.Row) -> WeatherStation:
     return WeatherStation(
         station_id=row["station_id"],
         name=row["name"],
-        location=Location(row["latitude"], row["longitude"]),
+        location=Location(row["latitude"], row["longitude"], row["city"], row["state"]),
         registered_at=datetime.fromisoformat(row["registered_at"]),
     )

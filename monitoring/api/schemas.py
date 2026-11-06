@@ -10,13 +10,15 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from monitoring.domain.model import Measurement, Metric, WeatherStation
+from monitoring.domain.model import CompassDirection, Measurement, Metric, WeatherStation
 
 
 class StationIn(BaseModel):
     name: str = Field(..., min_length=1, examples=["Roof station, building A"])
     latitude: float = Field(..., examples=[55.6761])
     longitude: float = Field(..., examples=[12.5683])
+    city: str | None = Field(None, examples=["Copenhagen"])
+    state: str | None = Field(None, examples=["Capital Region"])
 
 
 class StationOut(BaseModel):
@@ -24,6 +26,8 @@ class StationOut(BaseModel):
     name: str
     latitude: float
     longitude: float
+    city: str | None
+    state: str | None
     registered_at: datetime
 
     @staticmethod
@@ -33,6 +37,8 @@ class StationOut(BaseModel):
             name=s.name,
             latitude=s.location.latitude,
             longitude=s.location.longitude,
+            city=s.location.city,
+            state=s.location.state,
             registered_at=s.registered_at,
         )
 
@@ -51,6 +57,7 @@ class ReadingOut(BaseModel):
 class MeasurementIn(BaseModel):
     measured_at: datetime
     readings: list[ReadingIn] = Field(..., min_length=1)
+    wind_direction: CompassDirection | None = Field(None, examples=["NW"])
 
 
 class MeasurementOut(BaseModel):
@@ -59,6 +66,7 @@ class MeasurementOut(BaseModel):
     measured_at: datetime
     received_at: datetime
     readings: list[ReadingOut]
+    wind_direction: CompassDirection | None
 
     @staticmethod
     def from_domain(m: Measurement) -> MeasurementOut:
@@ -68,6 +76,7 @@ class MeasurementOut(BaseModel):
             measured_at=m.measured_at,
             received_at=m.received_at,
             readings=[ReadingOut(metric=r.metric, value=r.value, unit=r.unit) for r in m.readings],
+            wind_direction=m.wind_direction,
         )
 
 

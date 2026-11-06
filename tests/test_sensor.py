@@ -39,3 +39,16 @@ def test_invalid_sensor_settings_raise_config_error(tmp_path):
     path.write_text(json.dumps(raw))
     with pytest.raises(ConfigError):
         load_config(path)
+
+
+def test_wind_vane_produces_compass_points():
+    from sensor.domain import COMPASS_POINTS, SimulatedWindVane, WindVaneSettings
+
+    vane = SimulatedWindVane(WindVaneSettings(350, 30), rng=random.Random(1))
+    assert all(vane.read() in COMPASS_POINTS for _ in range(500))
+
+
+def test_default_config_has_r2_fields():
+    config = load_config("config/sensor_config.json")
+    assert config.station.city and config.station.state
+    assert build_device(config).take_sample().wind_direction is not None

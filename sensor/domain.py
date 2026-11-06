@@ -31,6 +31,21 @@ class SensorSettings:
 
 
 @dataclass(frozen=True)
+class WindVaneSettings:
+    """Value object: wind direction simulation (R2)."""
+
+    start_degrees: float = 315.0
+    max_step_degrees: float = 20.0
+
+
+COMPASS_POINTS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+
+
+def degrees_to_compass(degrees: float) -> str:
+    return COMPASS_POINTS[round((degrees % 360) / 45) % 8]
+
+
+@dataclass(frozen=True)
 class SensorReading:
     metric: str
     value: float
@@ -42,6 +57,7 @@ class SensorSample:
 
     measured_at: datetime
     readings: tuple[SensorReading, ...]
+    wind_direction: str | None = None  # "N", "NE", ... (R2)
 
 
 @dataclass
@@ -63,6 +79,23 @@ class SimulatedSensor:
 
 
 @dataclass
+class SimulatedWindVane:
+    """Wind direction does a random walk around the compass (wraps at 360°)."""
+
+    settings: WindVaneSettings
+    rng: random.Random = field(default_factory=random.Random)
+    _degrees: float = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._degrees = self.settings.start_degrees % 360
+
+    def read(self) -> str:
+        step = self.rng.uniform(-self.settings.max_step_degrees, self.settings.max_step_degrees)
+        self._degrees = (self._degrees + step) % 360
+        return degrees_to_compass(self._degrees)
+
+
+@dataclass
 class WeatherStationDevice:
     """Entity: the simulated weather station with its sensors."""
 
@@ -71,9 +104,13 @@ class WeatherStationDevice:
     latitude: float
     longitude: float
     sensors: list[SimulatedSensor]
+    wind_vane: SimulatedWindVane | None = None
+    city: str | None = None
+    state: str | None = None
 
     def take_sample(self) -> SensorSample:
         return SensorSample(
             measured_at=datetime.now(timezone.utc),
             readings=tuple(sensor.read() for sensor in self.sensors),
+            wind_direction=self.wind_vane.read() if self.wind_vane else None,
         )

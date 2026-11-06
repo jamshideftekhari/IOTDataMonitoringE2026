@@ -3,3 +3,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 *.db
+
+# MongoDB Compass export (contains user/host - keep it out of git)
+compass-connections.json
+.env

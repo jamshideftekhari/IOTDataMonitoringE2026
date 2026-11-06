@@ -13,7 +13,7 @@ import time
 
 from sensor.api_client import ApiError, MonitoringApiClient
 from sensor.config import AppConfig, ConfigError, load_config
-from sensor.domain import SimulatedSensor, WeatherStationDevice
+from sensor.domain import SimulatedSensor, SimulatedWindVane, WeatherStationDevice
 
 log = logging.getLogger("sensor")
 
@@ -26,6 +26,9 @@ def build_device(config: AppConfig) -> WeatherStationDevice:
         latitude=st.latitude,
         longitude=st.longitude,
         sensors=[SimulatedSensor(s) for s in config.sensors],
+        wind_vane=SimulatedWindVane(config.wind_vane) if config.wind_vane else None,
+        city=st.city,
+        state=st.state,
     )
 
 
@@ -49,6 +52,8 @@ def run(config: AppConfig, client: MonitoringApiClient, count: int | None = None
         try:
             client.send_sample(device.station_id, sample)
             values = ", ".join(f"{r.metric}={r.value}" for r in sample.readings)
+            if sample.wind_direction:
+                values += f", wind_direction={sample.wind_direction}"
             log.info("sent: %s", values)
         except ApiError as exc:
             log.error("could not send sample: %s", exc)

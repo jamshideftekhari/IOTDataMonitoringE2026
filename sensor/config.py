@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from sensor.domain import SensorSettings
+from sensor.domain import SensorSettings, WindVaneSettings
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,8 @@ class StationSettings:
     name: str
     latitude: float
     longitude: float
+    city: str | None = None
+    state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,7 @@ class AppConfig:
     station: StationSettings
     interval_seconds: float
     sensors: tuple[SensorSettings, ...]
+    wind_vane: WindVaneSettings | None = None
 
 
 class ConfigError(Exception):
@@ -53,6 +56,7 @@ def load_config(path: str | Path) -> AppConfig:
             station=StationSettings(**raw["station"]),
             interval_seconds=float(raw.get("interval_seconds", 5)),
             sensors=tuple(SensorSettings(**s) for s in raw["sensors"]),
+            wind_vane=WindVaneSettings(**raw["wind_direction"]) if "wind_direction" in raw else None,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ConfigError(f"invalid configuration: {exc}") from exc

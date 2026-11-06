@@ -1,7 +1,8 @@
 """Domain model for the *Monitoring* bounded context (the central API side).
 
 DDD building blocks used here:
-- Value Objects : Location, Reading            (immutable, compared by value)
+- Value Objects : Location, Reading,
+                  CompassDirection             (immutable, compared by value)
 - Entities      : WeatherStation, Measurement  (have identity)
 - Aggregate     : WeatherStation is the aggregate root for station data,
                   Measurement is its own small aggregate that references a
@@ -67,6 +68,25 @@ _METRIC_INFO: dict[Metric, tuple[str, tuple[float, float]]] = {
 }
 
 
+class CompassDirection(str, Enum):
+    """Wind direction as one of the 8 main compass points (R2)."""
+
+    N = "N"
+    NE = "NE"
+    E = "E"
+    SE = "SE"
+    S = "S"
+    SW = "SW"
+    W = "W"
+    NW = "NW"
+
+    @staticmethod
+    def from_degrees(degrees: float) -> CompassDirection:
+        """0° = N, 90° = E, ... Each point covers a 45° sector."""
+        points = list(CompassDirection)
+        return points[round((degrees % 360) / 45) % 8]
+
+
 # --------------------------------------------------------------------------- #
 # Value objects
 # --------------------------------------------------------------------------- #
@@ -74,6 +94,8 @@ _METRIC_INFO: dict[Metric, tuple[str, tuple[float, float]]] = {
 class Location:
     latitude: float
     longitude: float
+    city: str | None = None  # R2: used as metadata in the time-series store
+    state: str | None = None
 
     def __post_init__(self) -> None:
         if not -90.0 <= self.latitude <= 90.0:
@@ -125,9 +147,14 @@ class WeatherStation:
         self.name = name
         self.location = location
 
-    def record_measurement(self, measured_at: datetime, readings: list[Reading]) -> Measurement:
+    def record_measurement(
+        self,
+        measured_at: datetime,
+        readings: list[Reading],
+        wind_direction: CompassDirection | None = None,
+    ) -> Measurement:
         """Factory method: only a known station can produce a measurement."""
-        return Measurement.create(self.station_id, measured_at, readings)
+        return Measurement.create(self.station_id, measured_at, readings, wind_direction)
 
 
 @dataclass
@@ -139,9 +166,15 @@ class Measurement:
     measured_at: datetime
     received_at: datetime
     readings: tuple[Reading, ...]
+    wind_direction: CompassDirection | None = None
 
     @staticmethod
-    def create(station_id: str, measured_at: datetime, readings: list[Reading]) -> Measurement:
+    def create(
+        station_id: str,
+        measured_at: datetime,
+        readings: list[Reading],
+        wind_direction: CompassDirection | None = None,
+    ) -> Measurement:
         if not readings:
             raise InvalidMeasurementError("a measurement must contain at least one reading")
         metrics = [r.metric for r in readings]
@@ -159,6 +192,7 @@ class Measurement:
             measured_at=measured_at,
             received_at=now,
             readings=tuple(readings),
+            wind_direction=wind_direction,
         )
 
     def reading_for(self, metric: Metric) -> Reading | None:
